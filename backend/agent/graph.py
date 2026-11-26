@@ -12,6 +12,7 @@ from langgraph.graph import StateGraph, END
 from backend.services.gemini_service import (
     parse_query_with_gemini,
     generate_stock_analysis,
+    summarize_stock_news,
 )
 from backend.tools.stock_tools import (
     get_stock_price,
@@ -130,7 +131,10 @@ def fetch_data_node(state: AgentState) -> dict:
             tool_results["company_info"] = get_company_info.invoke({"ticker": ticker})
             tool_results["financial_summary"] = get_financial_summary.invoke({"ticker": ticker})
             tool_results["history"] = get_stock_history.invoke({"ticker": ticker, "period": "1mo"})
-            tool_results["news"] = search_stock_news.invoke({"ticker": ticker})
+            news_res = search_stock_news.invoke({"ticker": ticker})
+            if isinstance(news_res, dict) and news_res.get("status") == "success" and news_res.get("news"):
+                news_res["summary"] = summarize_stock_news(ticker, news_res["news"])
+            tool_results["news"] = news_res
     except Exception as e:
         logger.error(f"Error executing stock tools for {ticker}: {e}")
         return {"tool_results": tool_results, "error": f"Tool execution failed: {e}"}

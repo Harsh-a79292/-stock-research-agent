@@ -374,6 +374,27 @@ def generate_pdf_report(state: dict, output_path: str | Path | None = None) -> b
     else:
         elements.append(Paragraph("<i>No detailed analysis was generated for this query.</i>", styles["ReportBody"]))
 
+    # 3b. Latest Financial News Section (if available)
+    news_res = tool_results.get("news")
+    if isinstance(news_res, dict) and news_res.get("status") == "success":
+        articles = news_res.get("news") or []
+        news_summary = news_res.get("summary") or ""
+        if news_summary or articles:
+            elements.append(Spacer(1, 8))
+            elements.append(Paragraph("Latest Financial News", styles["ReportH2"]))
+            if news_summary:
+                clean_summary = html.escape(news_summary)
+                clean_summary = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", clean_summary)
+                elements.append(Paragraph(clean_summary, styles["ReportBody"]))
+                elements.append(Spacer(1, 4))
+            for item in articles[:5]:
+                title = html.escape(_safe_str(item.get("title"), "Untitled"))
+                source = html.escape(_safe_str(item.get("source"), "News"))
+                pub_date = html.escape(_safe_str(item.get("published_at"), ""))
+                sentiment = html.escape(_safe_str(item.get("sentiment"), "Neutral"))
+                meta = f"{source}" + (f" | {pub_date}" if pub_date and pub_date != "—" else "") + f" | Sentiment: <b>{sentiment}</b>"
+                elements.append(Paragraph(f"&bull; <b>{title}</b><br/><font size='8' color='#475569'>{meta}</font>", styles["ReportBullet"]))
+
     # 4. Disclaimer Footer
     elements.append(Spacer(1, 12))
     elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0"), spaceAfter=4))

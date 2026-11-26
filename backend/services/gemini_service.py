@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from google import genai
+from google.genai import types
 from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def get_gemini_client() -> genai.Client | None:
     if not api_key:
         return None
     try:
-        return genai.Client(api_key=api_key)
+        return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=15_000))
     except Exception as e:
         logger.error(f"Failed to initialize Gemini Client: {e}")
         return None
@@ -242,11 +243,21 @@ def generate_deterministic_report(query: str, ticker: str, intent: str, tool_res
     if isinstance(news_data, dict):
         if news_data.get("status") == "unavailable":
             lines.append("## News & Sentiment")
-            lines.append(f"> Note: {news_data.get('error', 'Stock news is unavailable on standard tier.')}\n")
+            lines.append(f"> Note: {news_data.get('error', 'Stock news is unavailable.')}\n")
         elif news_data.get("status") == "success" and news_data.get("news"):
-            lines.append("## Recent News")
-            for item in news_data.get("news", [])[:3]:
-                lines.append(f"- [{item.get('title')}]({item.get('link')}) ({item.get('publisher')})")
+            lines.append("## Recent Financial News")
+            if news_data.get("summary"):
+                lines.append(news_data["summary"])
+                lines.append("")
+            for item in news_data.get("news", [])[:5]:
+                title = item.get("title", "Untitled")
+                url = item.get("url") or item.get("link") or ""
+                source = item.get("source") or item.get("publisher") or "News"
+                sentiment = item.get("sentiment", "Neutral")
+                pub_date = item.get("published_at") or ""
+                date_suffix = f" · {pub_date}" if pub_date else ""
+                link_part = f"[{title}]({url})" if url else title
+                lines.append(f"- {link_part} ({source}{date_suffix}) — **{sentiment}**")
             lines.append("")
 
     lines.append("---")
@@ -292,3 +303,46 @@ def generate_stock_analysis(query: str, ticker: str, intent: str, tool_results: 
     except Exception as e:
         logger.warning(f"Gemini report generation failed ({e}). Falling back to deterministic report.")
         return generate_deterministic_report(query, ticker, intent, tool_results)
+
+
+def summarize_stock_news(ticker: str, articles: list[dict]) -> str:
+    """
+    Generate a concise Gemini-powered summary of recent financial news articles,
+    falling back deterministically if Gemini is unavailable.
+    """
+    if not articles:
+        return ""
+
+    top_articles = articles[:6]
+    client = get_gemini_client()
+    if client:
+        bullets = "\n".join(
+            f"- {a.get('title', '')} (Source: {a.get('source', 'News')}, "
+            f"Date: {a.get('published_at', 'N/A')}, Sentiment: {a.get('sentiment', 'Neutral')})"
+            for a in top_articles
+        )
+        prompt = (
+            f"Summarize the latest financial news for {ticker} in 2-3 concise sentences "
+            f"covering key catalysts, risks, and overall sentiment based strictly on these headlines:\n\n"
+            f"{bullets}"
+        )
+        try:
+            response = client.models.generate_content(
+                model=DEFAULT_MODEL,
+                contents=prompt,
+            )
+            if response and response.text:
+                return response.text.strip()
+        except Exception as e:
+            logger.warning(f"Gemini news summary failed ({e}); using deterministic summary.")
+
+    # Deterministic fallback summary
+    sentiments = [a.get("sentiment", "Neutral") for a in top_articles]
+    bullish = sentiments.count("Bullish")
+    bearish = sentiments.count("Bearish")
+    overall = "Bullish" if bullish > bearish else "Bearish" if bearish > bullish else "Neutral"
+    headlines = "; ".join(a.get("title", "") for a in top_articles[:3] if a.get("title"))
+    return (
+        f"Recent coverage for {ticker} reflects an overall **{overall}** tone "
+        f"across {len(top_articles)} articles. Key headlines: {headlines}."
+    )

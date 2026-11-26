@@ -668,9 +668,10 @@ if result:
         st.write("")
 
         # 3. Main Dashboard Tabs
-        tab_report, tab_chart, tab_company, tab_email, tab_state = st.tabs(
+        tab_report, tab_news, tab_chart, tab_company, tab_email, tab_state = st.tabs(
             [
                 "📝 Agent Research Report",
+                "📰 Latest News",
                 "📊 Interactive OHLCV Chart",
                 "🏢 Corporate & Financials",
                 "✉️ Email Report",
@@ -703,6 +704,55 @@ if result:
             )
             st.markdown(analysis)
             st.markdown("</div>", unsafe_allow_html=True)
+
+        with tab_news:
+            news_res = tool_results.get("news") if isinstance(tool_results, dict) else None
+            if isinstance(news_res, dict) and news_res.get("status") == "success":
+                articles = news_res.get("news") or []
+                news_summary = news_res.get("summary") or ""
+                if news_summary:
+                    st.markdown("#### **AI News Summary**")
+                    st.markdown(
+                        f'<div class="saas-card">{html.escape(news_summary)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                st.markdown(f"#### **Recent Headlines ({len(articles)})**")
+                for item in articles:
+                    title_str = html.escape(str(item.get("title") or "Untitled"))
+                    url_str = str(item.get("url") or "")
+                    source_str = html.escape(str(item.get("source") or "News"))
+                    pub_str = html.escape(str(item.get("published_at") or "Recent"))
+                    sent_str = str(item.get("sentiment") or "Neutral")
+                    badge_cls = (
+                        "badge-emerald" if sent_str == "Bullish"
+                        else "badge-coral" if sent_str == "Bearish"
+                        else "badge-slate"
+                    )
+                    link_html = (
+                        f'<a href="{html.escape(url_str)}" target="_blank" style="color:#f8fafc;text-decoration:none;font-weight:700;">{title_str}</a>'
+                        if url_str else f'<span style="font-weight:700;">{title_str}</span>'
+                    )
+                    st.markdown(
+                        f"""
+                        <div class="saas-card" style="padding:14px 18px;margin-bottom:10px;">
+                            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+                                <div>{link_html}</div>
+                                <span class="{badge_cls}">{html.escape(sent_str)}</span>
+                            </div>
+                            <div style="color:#94a3b8;font-size:0.82rem;margin-top:6px;">
+                                {source_str} &middot; {pub_str}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            elif isinstance(news_res, dict) and news_res.get("error"):
+                st.info(news_res.get("error"))
+            else:
+                st.info(
+                    f"Latest financial news was not requested for intent **'{intent}'**. "
+                    f"Ask for a **'Full research report on {ticker}'** to include news and sentiment."
+                )
 
         with tab_chart:
             history_res = tool_results.get("history") if isinstance(tool_results, dict) else None

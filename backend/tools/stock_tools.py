@@ -8,6 +8,8 @@ Provides price, historical chart data, company info, financials, and news search
 import json
 import logging
 import math
+import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import requests
@@ -514,17 +516,65 @@ def get_financial_summary(ticker: str | None = "") -> dict:
     }
 
 
+_BULLISH_WORDS = {
+    "beat", "beats", "surge", "surges", "rally", "rallies", "gain", "gains",
+    "growth", "upgrade", "upgraded", "record", "strong", "bullish", "outperform",
+    "profit", "soar", "soars", "rise", "rises", "buy", "boost",
+}
+_BEARISH_WORDS = {
+    "miss", "misses", "drop", "drops", "fall", "falls", "plunge", "plunges",
+    "downgrade", "downgraded", "loss", "losses", "weak", "bearish", "cut",
+    "cuts", "decline", "declines", "lawsuit", "probe", "sell", "warning", "risk",
+}
+
+
+def _infer_headline_sentiment(title: str) -> str:
+    """Infer lightweight sentiment label from a news headline."""
+    words = set(re.findall(r"[a-z]+", (title or "").lower()))
+    pos = len(words & _BULLISH_WORDS)
+    neg = len(words & _BEARISH_WORDS)
+    if pos > neg:
+        return "Bullish"
+    if neg > pos:
+        return "Bearish"
+    return "Neutral"
+
+
+def _parse_rss_feed(xml_text: str, default_source: str, limit: int = 8) -> list[dict]:
+    """Parse standard RSS 2.0 XML into normalized news article dicts."""
+    articles: list[dict] = []
+    root = ET.fromstring(xml_text)
+    for item in root.findall(".//item")[:limit]:
+        title = (item.findtext("title") or "").strip()
+        url = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        source_el = item.find("source")
+        source = (source_el.text.strip() if source_el is not None and source_el.text else "") or default_source
+        if not title or not url:
+            continue
+        articles.append(
+            {
+                "title": title,
+                "source": source,
+                "url": url,
+                "published_at": pub_date,
+                "sentiment": _infer_headline_sentiment(title),
+            }
+        )
+    return articles
+
+
 @tool
 def search_stock_news(ticker: str | None = "") -> dict:
     """
-    Search for recent news articles related to a stock.
-    Note: Alpha Vantage News & Sentiment endpoint requires a premium tier subscription.
+    Fetch latest financial news for a stock ticker using free public RSS feeds
+    (Yahoo Finance RSS primary, Google News RSS fallback).
 
     Args:
         ticker: Stock ticker symbol.
 
     Returns:
-        A dict containing news articles, timestamp, and status.
+        A dict containing normalized news articles, source, timestamp, and status.
     """
     timestamp = datetime.now(timezone.utc).isoformat()
     valid, clean_ticker = _validate_ticker(ticker)
@@ -538,16 +588,38 @@ def search_stock_news(ticker: str | None = "") -> dict:
             "error": clean_ticker,
         }
 
-    api_key = settings.alpha_vantage_api_key.strip() if settings.alpha_vantage_api_key else ""
-    if not api_key:
-        return {
-            "ticker": clean_ticker,
-            "news": [],
-            "timestamp": timestamp,
-            "notice": DATA_DELAY_NOTICE,
-            "status": "error",
-            "error": "Alpha Vantage API key is not configured. Please set ALPHA_VANTAGE_API_KEY.",
-        }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; StockResearchAgent/1.0)"
+    }
+    sources = [
+        (
+            "Yahoo Finance RSS",
+            f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={clean_ticker}&region=US&lang=en-US",
+        ),
+        (
+            "Google News RSS",
+            f"https://news.google.com/rss/search?q={clean_ticker}+stock+finance&hl=en-US&gl=US&ceid=US:en",
+        ),
+    ]
+
+    last_error = "No news articles found."
+    for source_name, feed_url in sources:
+        try:
+            resp = requests.get(feed_url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            articles = _parse_rss_feed(resp.text, default_source=source_name, limit=8)
+            if articles:
+                return {
+                    "ticker": clean_ticker,
+                    "news": articles,
+                    "feed_source": source_name,
+                    "timestamp": timestamp,
+                    "notice": DATA_DELAY_NOTICE,
+                    "status": "success",
+                }
+        except Exception as e:
+            logger.warning(f"[{clean_ticker}] {source_name} fetch failed: {e}")
+            last_error = str(e)
 
     return {
         "ticker": clean_ticker,
@@ -555,8 +627,7 @@ def search_stock_news(ticker: str | None = "") -> dict:
         "timestamp": timestamp,
         "notice": DATA_DELAY_NOTICE,
         "status": "unavailable",
-        "error": "Stock news is unavailable: Alpha Vantage News & Sentiment requires a premium subscription.",
-        "message": "Stock news is unavailable: Alpha Vantage News & Sentiment requires a premium subscription.",
+        "error": f"Unable to fetch financial news for {clean_ticker}: {last_error}",
     }
 
 

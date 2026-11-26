@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "info"
+    cors_origins: str = ""
 
     # ── Frontend ──────────────────────────────────────────────────────────────
     backend_url: str = "http://localhost:8000"

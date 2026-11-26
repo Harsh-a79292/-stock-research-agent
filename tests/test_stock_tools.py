@@ -422,26 +422,36 @@ def test_get_financial_summary_all_empty_returns_error():
 
 
 def test_search_stock_news_unavailable():
-    """Test search_stock_news returns a consistent structured response with unavailable status."""
-    result = search_stock_news.invoke({"ticker": "AAPL"})
+    """Test search_stock_news returns a consistent structured response when RSS feeds fail."""
+    with patch("backend.tools.stock_tools.requests.get", side_effect=RuntimeError("Feed unavailable")):
+        result = search_stock_news.invoke({"ticker": "AAPL"})
 
     assert isinstance(result, dict)
     assert result["status"] == "unavailable"
     assert result["ticker"] == "AAPL"
     assert result["news"] == []
     assert "unavailable" in result["error"].lower()
-    assert "premium" in result["message"].lower()
     assert "notice" in result
 
 
-def test_search_stock_news_missing_api_key():
-    """Test search_stock_news when API key is missing."""
+def test_search_stock_news_without_alpha_vantage_key():
+    """Test search_stock_news works with free RSS feeds even when ALPHA_VANTAGE_API_KEY is empty."""
     settings.alpha_vantage_api_key = ""
-    result = search_stock_news.invoke({"ticker": "AAPL"})
+    mock_resp = MagicMock()
+    mock_resp.text = """<?xml version="1.0" encoding="UTF-8" ?>
+    <rss version="2.0"><channel><item>
+      <title>Apple gains on strong demand</title>
+      <link>https://example.com/1</link>
+      <pubDate>Thu, 26 Nov 2026 05:00:00 +0000</pubDate>
+      <source>Reuters</source>
+    </item></channel></rss>"""
+    mock_resp.raise_for_status.return_value = None
 
-    assert result["status"] == "error"
-    assert result["news"] == []
-    assert "API key is not configured" in result["error"]
+    with patch("backend.tools.stock_tools.requests.get", return_value=mock_resp):
+        result = search_stock_news.invoke({"ticker": "AAPL"})
+
+    assert result["status"] == "success"
+    assert len(result["news"]) == 1
 
 
 def test_search_stock_news_invalid_ticker():
