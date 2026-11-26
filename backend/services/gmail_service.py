@@ -9,6 +9,7 @@ exposes OAuth tokens or client secrets.
 import base64
 import json
 import logging
+import os
 import re
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -58,13 +59,60 @@ def _get_paths() -> tuple[Path, Path]:
     return creds_path, token_path
 
 
+def _get_streamlit_secret(key: str):
+    """Safely read a secret from st.secrets if Streamlit is available, else None."""
+    try:
+        import streamlit as st
+        secrets = getattr(st, "secrets", None)
+        if secrets is not None and key in secrets:
+            return secrets[key]
+    except Exception:
+        pass
+    return None
+
+
+def _get_secret_json(key: str) -> dict | None:
+    """
+    Read a JSON object from environment variable or Streamlit Secrets.
+    Supports both JSON strings and mapping/dict values without logging contents.
+    """
+    raw = os.getenv(key) or _get_streamlit_secret(key)
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    try:
+        return dict(raw)
+    except Exception:
+        return None
+
+
+def _get_sender_email() -> str:
+    """Return sender email from settings, env, or Streamlit Secrets."""
+    if settings.gmail_sender_email and settings.gmail_sender_email.strip():
+        return settings.gmail_sender_email.strip()
+    env_val = os.getenv("GMAIL_SENDER_EMAIL") or _get_streamlit_secret("GMAIL_SENDER_EMAIL")
+    return str(env_val).strip() if env_val else ""
+
+
+def _has_valid_client_secrets_data(data: dict | None) -> bool:
+    """Return True if parsed OAuth client dict has 'installed' or 'web'."""
+    return isinstance(data, dict) and ("installed" in data or "web" in data)
+
+
 def _has_valid_client_secrets(creds_path: Path) -> bool:
     """Return True if creds_path exists and contains a valid OAuth client JSON structure."""
     if not creds_path.is_file() or creds_path.stat().st_size == 0:
         return False
     try:
         data = json.loads(creds_path.read_text(encoding="utf-8"))
-        return isinstance(data, dict) and ("installed" in data or "web" in data)
+        return _has_valid_client_secrets_data(data)
     except Exception:
         return False
 
@@ -72,26 +120,42 @@ def _has_valid_client_secrets(creds_path: Path) -> bool:
 def get_gmail_status() -> dict:
     """
     Non-interactive status check for UI display.
+    Supports both local OAuth files and Streamlit Secrets / env JSON.
     Never triggers OAuth browser flow or sends emails.
     """
     creds_path, token_path = _get_paths()
     has_creds_file = _has_valid_client_secrets(creds_path)
-    has_token_file = token_path.is_file()
+    has_creds_secret = _has_valid_client_secrets_data(_get_secret_json("GMAIL_CREDENTIALS_JSON"))
+    credentials_present = has_creds_file or has_creds_secret
 
-    if has_token_file:
+    if token_path.is_file():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
             if creds and (creds.valid or (creds.expired and creds.refresh_token)):
                 return {
                     "ready": True,
                     "authenticated": True,
-                    "credentials_present": has_creds_file,
+                    "credentials_present": credentials_present,
                     "status_label": "Gmail Ready",
                 }
         except Exception:
             pass
 
-    if has_creds_file:
+    token_info = _get_secret_json("GMAIL_TOKEN_JSON")
+    if token_info:
+        try:
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+            if creds and (creds.valid or (creds.expired and creds.refresh_token)):
+                return {
+                    "ready": True,
+                    "authenticated": True,
+                    "credentials_present": credentials_present,
+                    "status_label": "Gmail Ready",
+                }
+        except Exception:
+            pass
+
+    if credentials_present:
         return {
             "ready": True,
             "authenticated": False,
@@ -117,19 +181,31 @@ def _save_token(token_path: Path, creds: Credentials) -> None:
 def get_gmail_credentials(interactive: bool = False) -> tuple[Credentials | None, str | None]:
     """
     Load, refresh, or (if interactive=True) obtain Gmail OAuth 2.0 credentials.
+    Checks local token file first, then Streamlit Secrets / env GMAIL_TOKEN_JSON.
 
     Returns:
         (Credentials_or_None, error_message_or_None)
     """
     creds_path, token_path = _get_paths()
     creds: Credentials | None = None
+    loaded_from_file = False
 
     if token_path.is_file():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            loaded_from_file = True
         except Exception:
-            logger.warning("Failed to load existing Gmail token file; re-authentication required.")
+            logger.warning("Failed to load existing Gmail token file; checking fallback sources.")
             creds = None
+
+    if creds is None:
+        token_info = _get_secret_json("GMAIL_TOKEN_JSON")
+        if token_info:
+            try:
+                creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+            except Exception:
+                logger.warning("Failed to load Gmail token from Secrets/environment.")
+                creds = None
 
     if creds and creds.valid:
         return creds, None
@@ -137,7 +213,8 @@ def get_gmail_credentials(interactive: bool = False) -> tuple[Credentials | None
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            _save_token(token_path, creds)
+            if loaded_from_file:
+                _save_token(token_path, creds)
             return creds, None
         except RefreshError:
             logger.warning("Gmail OAuth token refresh failed or was revoked.")
@@ -149,7 +226,8 @@ def get_gmail_credentials(interactive: bool = False) -> tuple[Credentials | None
     if not interactive:
         return None, "Gmail authentication required. Please authorize Gmail OAuth 2.0."
 
-    if not creds_path.is_file():
+    creds_secret = _get_secret_json("GMAIL_CREDENTIALS_JSON")
+    if not creds_path.is_file() and not _has_valid_client_secrets_data(creds_secret):
         return (
             None,
             f"Gmail OAuth credentials file not found at '{creds_path}'. "
@@ -157,7 +235,10 @@ def get_gmail_credentials(interactive: bool = False) -> tuple[Credentials | None
         )
 
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+        if creds_path.is_file():
+            flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+        else:
+            flow = InstalledAppFlow.from_client_config(creds_secret, SCOPES)
         creds = flow.run_local_server(port=0)
         _save_token(token_path, creds)
         return creds, None
@@ -291,7 +372,7 @@ def send_research_email(
             body=clean_body,
             pdf_bytes=bytes(pdf_bytes),
             pdf_filename=pdf_filename,
-            sender=settings.gmail_sender_email,
+            sender=_get_sender_email(),
         )
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         sent = service.users().messages().send(userId="me", body=raw_message).execute()

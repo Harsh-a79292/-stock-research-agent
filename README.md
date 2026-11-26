@@ -88,5 +88,8 @@ Configure these under **GitHub Repository -> Settings -> Secrets and variables -
    SUPABASE_URL = "..."
    SUPABASE_KEY = "..."
    BACKEND_URL = "https://<your-render-service>.onrender.com"
+   GMAIL_SENDER_EMAIL = "your-email@gmail.com"
+   GMAIL_CREDENTIALS_JSON = '''{"installed": {...}}'''
+   GMAIL_TOKEN_JSON = '''{"token": "...", "refresh_token": "...", ...}'''
    ```
 3. Update `CORS_ORIGINS` on Render with your live Streamlit Community Cloud URL.
